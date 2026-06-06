@@ -1,7 +1,16 @@
 import cv2
 import numpy as np
-import os
-import sys
+import argparse
+import shutil
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+IMAGE_EXTENSIONS = (".jpg", ".png", ".jpeg", ".bmp", ".tif", ".tiff")
+BASE_DIR = Path(__file__).resolve().parent
+TEST_DIR = BASE_DIR / "test"
+DETECTION_THRESHOLD = 8
 
 class RobustTerrainMatcher:
     """
@@ -89,8 +98,8 @@ class RobustTerrainMatcher:
         
         return len(good_matches), inliers, confidence, (kp1, kp2, final_matches), homography
 
-    def run(self, ref_paths, test_path):
-        """Executes the pipeline across multiple reference images."""
+    def evaluate(self, ref_paths, test_path):
+        """Returns the best reference match for one test image."""
         print(f"Loading test image: {test_path}")
         test_gray, test_img = self.preprocess(test_path)
         test_h, test_w = test_gray.shape
@@ -118,9 +127,14 @@ class RobustTerrainMatcher:
             print(f"  - Final Score: {conf:.2f}")
             print("-" * 30)
 
-        # Identify best match based on highest inlier count
         best = max(results, key=lambda x: x['confidence'])
-        
+
+        return best, test_h, test_w
+
+    def run(self, ref_paths, test_path, output_path="match_output.jpg"):
+        """Executes the pipeline across multiple reference images."""
+        best, test_h, test_w = self.evaluate(ref_paths, test_path)
+
         print("\n" + "="*40)
         print(f"BEST MATCH: {best['name']}")
         print(f"Confidence score: {best['confidence']:.2f}")
@@ -161,41 +175,187 @@ class RobustTerrainMatcher:
         cv2.putText(vis_img, f"Best Match: {best['name']} ({decision})", (20, 40), 
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
-        vis_path = "match_output.jpg"
-        cv2.imwrite(vis_path, vis_img)
-        print(f"\nResult visualization saved to: {vis_path}")
+        cv2.imwrite(str(output_path), vis_img)
+        print(f"\nResult visualization saved to: {output_path}")
+
+        return best, decision
+
+
+def ensure_folder(path):
+    Path(path).mkdir(exist_ok=True)
+
+
+def is_image_file(path):
+    return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+
+
+def reference_paths():
+    ref_files = []
+    for i in range(1, 4):
+        for ext in IMAGE_EXTENSIONS:
+            path = BASE_DIR / f"ref{i}{ext}"
+            if path.exists():
+                ref_files.append(path)
+                break
+
+    return ref_files
+
+
+def reference_detection_folder(reference_path):
+    return BASE_DIR / f"{Path(reference_path).stem}_detections"
+
+
+def unique_destination(folder, source_path):
+    destination = folder / source_path.name
+    if not destination.exists():
+        return destination
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return folder / f"{source_path.stem}_{timestamp}{source_path.suffix}"
+
+
+def wait_until_file_is_ready(path, checks=3, delay=0.4):
+    last_size = -1
+    stable_checks = 0
+
+    while stable_checks < checks:
+        current_size = path.stat().st_size
+        if current_size == last_size and current_size > 0:
+            stable_checks += 1
+        else:
+            stable_checks = 0
+            last_size = current_size
+        time.sleep(delay)
+
+
+def file_signature(path):
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_size
+
+
+def process_test_image(path, matcher, refs, threshold):
+    wait_until_file_is_ready(path)
+    best, _, _ = matcher.evaluate([str(ref) for ref in refs], str(path))
+    score = best["confidence"]
+    detected = score >= threshold
+
+    if detected:
+        output_folder = reference_detection_folder(best["name"])
+        ensure_folder(output_folder)
+        destination = unique_destination(output_folder, path)
+        shutil.copy2(path, destination)
+        status = f"DETECTED -> {output_folder.name}/{destination.name}"
+    else:
+        status = "NO_MATCH"
+
+    print(
+        f"{status}: {path.name} | "
+        f"best_reference={Path(best['name']).name} | "
+        f"score={score:.0f} | "
+        f"good_matches={best['good_matches']} | "
+        f"inliers={best['inliers']}"
+    )
+
+    return detected
+
+
+def run_test_folder(threshold=DETECTION_THRESHOLD, poll_seconds=1.0, once=False):
+    refs = reference_paths()
+    if len(refs) < 3:
+        print("Error: Required reference images not found. Need ref1, ref2, and ref3.")
+        return
+
+    ensure_folder(TEST_DIR)
+    for ref in refs:
+        ensure_folder(reference_detection_folder(ref))
+
+    matcher = RobustTerrainMatcher(confidence_threshold=threshold)
+    processed = {}
+
+    print(f"Watching test images in: {TEST_DIR}")
+    print(f"Detection threshold: {threshold} RANSAC inliers")
+    print("Press Ctrl+C to stop.")
+
+    try:
+        while True:
+            for path in sorted(TEST_DIR.iterdir()):
+                if not is_image_file(path):
+                    continue
+
+                signature = file_signature(path)
+                if processed.get(path.name) == signature:
+                    continue
+
+                try:
+                    process_test_image(path, matcher, refs, threshold)
+                except FileNotFoundError as error:
+                    print(error)
+                processed[path.name] = file_signature(path)
+
+            if once:
+                break
+            time.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        print("\nTest folder matcher stopped.")
 
 def main():
-    # Support common image formats
-    extensions = ['.jpg', '.png', '.jpeg']
-    ref_files = []
-    
-    # Locate reference images ref1, ref2, ref3
-    for i in range(1, 4):
-        for ext in extensions:
-            p = f"ref{i}{ext}"
-            if os.path.exists(p):
-                ref_files.append(p)
+    parser = argparse.ArgumentParser(
+        description="Match test terrain images against ref1, ref2, and ref3."
+    )
+    parser.add_argument(
+        "test_image",
+        nargs="?",
+        help="Optional single test image. If omitted, test.png/jpg/jpeg is used.",
+    )
+    parser.add_argument(
+        "--watch-test-folder",
+        action="store_true",
+        help="Continuously process images received in the test folder.",
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Process current test folder images once, then exit.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=int,
+        default=DETECTION_THRESHOLD,
+        help="Minimum RANSAC inlier score needed to save into a detection folder.",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=1.0,
+        help="How often to check the test folder in watch mode.",
+    )
+    args = parser.parse_args()
+
+    if args.watch_test_folder or args.once:
+        run_test_folder(
+            threshold=args.threshold,
+            poll_seconds=args.poll_seconds,
+            once=args.once,
+        )
+        return
+
+    ref_files = [str(path) for path in reference_paths()]
+
+    test_file = args.test_image
+    if not test_file:
+        for ext in IMAGE_EXTENSIONS:
+            path = BASE_DIR / f"test{ext}"
+            if path.exists():
+                test_file = str(path)
                 break
-    
-    # Handle test image input (command line or default)
-    test_file = None
-    if len(sys.argv) > 1:
-        test_file = sys.argv[1]
-    else:
-        for ext in extensions:
-            p = f"test{ext}"
-            if os.path.exists(p):
-                test_file = p
-                break
-    
+
     if not test_file or len(ref_files) < 3:
         print("Error: Required images not found. Need ref1, ref2, ref3 and test.")
         print("Usage: python3 match.py [path_to_test_image]")
         return
 
     # Initialize matcher with a recommended threshold of 15-20 inliers for terrain
-    matcher = RobustTerrainMatcher(confidence_threshold=18)
+    matcher = RobustTerrainMatcher(confidence_threshold=args.threshold)
     matcher.run(ref_files, test_file)
 
 if __name__ == "__main__":
