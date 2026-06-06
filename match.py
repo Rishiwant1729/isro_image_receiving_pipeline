@@ -10,6 +10,8 @@ from pathlib import Path
 IMAGE_EXTENSIONS = (".jpg", ".png", ".jpeg", ".bmp", ".tif", ".tiff")
 BASE_DIR = Path(__file__).resolve().parent
 TEST_DIR = BASE_DIR / "test"
+DOWN_SCALED_REF_DIR = BASE_DIR / "down_scale_ref_images"
+DOWN_SCALED_TEST_DIR = BASE_DIR / "down_scale_test_images"
 DETECTION_THRESHOLD = 8
 
 class RobustTerrainMatcher:
@@ -205,6 +207,37 @@ def reference_detection_folder(reference_path):
     return BASE_DIR / f"{Path(reference_path).stem}_detections"
 
 
+def save_downscaled_gray_copy(source_path, output_folder, update_only_when_needed=False):
+    output_path = output_folder / source_path.name
+    if (
+        update_only_when_needed
+        and output_path.exists()
+        and output_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns
+    ):
+        return True
+
+    image = cv2.imread(str(source_path))
+    if image is None:
+        print(f"Could not create downscaled preview for: {source_path}")
+        return False
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    downscaled = cv2.resize(gray, (128, 128), interpolation=cv2.INTER_AREA)
+    output_folder.mkdir(exist_ok=True)
+    cv2.imwrite(str(output_path), downscaled)
+    return True
+
+
+def save_downscaled_reference_images(refs):
+    ensure_folder(DOWN_SCALED_REF_DIR)
+    for ref in refs:
+        save_downscaled_gray_copy(
+            ref,
+            DOWN_SCALED_REF_DIR,
+            update_only_when_needed=True,
+        )
+
+
 def unique_destination(folder, source_path):
     destination = folder / source_path.name
     if not destination.exists():
@@ -235,6 +268,7 @@ def file_signature(path):
 
 def process_test_image(path, matcher, refs, threshold):
     wait_until_file_is_ready(path)
+    save_downscaled_gray_copy(path, DOWN_SCALED_TEST_DIR)
     best, _, _ = matcher.evaluate([str(ref) for ref in refs], str(path))
     score = best["confidence"]
     detected = score >= threshold
@@ -266,6 +300,8 @@ def run_test_folder(threshold=DETECTION_THRESHOLD, poll_seconds=1.0, once=False)
         return
 
     ensure_folder(TEST_DIR)
+    ensure_folder(DOWN_SCALED_TEST_DIR)
+    save_downscaled_reference_images(refs)
     for ref in refs:
         ensure_folder(reference_detection_folder(ref))
 
@@ -353,6 +389,10 @@ def main():
         print("Error: Required images not found. Need ref1, ref2, ref3 and test.")
         print("Usage: python3 match.py [path_to_test_image]")
         return
+
+    ensure_folder(DOWN_SCALED_TEST_DIR)
+    save_downscaled_reference_images(reference_paths())
+    save_downscaled_gray_copy(Path(test_file), DOWN_SCALED_TEST_DIR)
 
     # Initialize matcher with a recommended threshold of 15-20 inliers for terrain
     matcher = RobustTerrainMatcher(confidence_threshold=args.threshold)

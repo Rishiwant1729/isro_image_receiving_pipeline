@@ -10,6 +10,13 @@ Incoming images are saved into:
 test/
 ```
 
+Downscaled grayscale preview images are also saved separately for showing:
+
+```text
+down_scale_ref_images/
+down_scale_test_images/
+```
+
 Detected images are copied into the folder for the best matching reference:
 
 ```text

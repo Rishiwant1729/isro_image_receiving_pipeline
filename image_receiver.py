@@ -6,9 +6,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+try:
+    import cv2
+except ModuleNotFoundError:
+    cv2 = None
+
 
 BASE_DIR = Path(__file__).resolve().parent
 TEST_DIR = BASE_DIR / "test"
+DOWNSCALED_TEST_DIR = BASE_DIR / "down_scale_test_images"
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 SAFE_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -35,6 +41,23 @@ def validate_filename(filename):
         return None, "unsupported image extension"
 
     return name, None
+
+
+def save_downscaled_gray_copy(source_path):
+    if cv2 is None:
+        print("OpenCV is not available; skipped downscaled preview.")
+        return False
+
+    image = cv2.imread(str(source_path))
+    if image is None:
+        print(f"Could not create downscaled preview for: {source_path}")
+        return False
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    downscaled = cv2.resize(gray, (128, 128), interpolation=cv2.INTER_AREA)
+    DOWNSCALED_TEST_DIR.mkdir(exist_ok=True)
+    cv2.imwrite(str(DOWNSCALED_TEST_DIR / source_path.name), downscaled)
+    return True
 
 
 class ImageUploadHandler(BaseHTTPRequestHandler):
@@ -122,6 +145,7 @@ class ImageUploadHandler(BaseHTTPRequestHandler):
             temp_path = Path(temp_file.name)
 
         temp_path.replace(final_path)
+        save_downscaled_gray_copy(final_path)
         print(f"Received test image: {final_path}")
         json_response(
             self,
@@ -137,6 +161,7 @@ class ImageUploadHandler(BaseHTTPRequestHandler):
 
 def run_receiver(host, port):
     TEST_DIR.mkdir(exist_ok=True)
+    DOWNSCALED_TEST_DIR.mkdir(exist_ok=True)
     server = ThreadingHTTPServer((host, port), ImageUploadHandler)
     print(f"Image receiver listening on http://{host}:{port}")
     print(f"Saving uploaded test images to {TEST_DIR}")
